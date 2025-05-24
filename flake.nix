@@ -29,6 +29,7 @@
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
+            cargo-expand
             rustfmt
             protobuf
             pkg-config
