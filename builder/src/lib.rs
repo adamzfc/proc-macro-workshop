@@ -69,7 +69,7 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = get_fields_from_derive_input(st)?;
     let builder_struct_fields_def = generate_builder_struct_fields_def(fields)?;
     let builder_struct_factory_init_clauses = generate_builder_struct_factory_init_clauses(fields)?;
-    let builder_struct_setters: Vec<proc_macro2::TokenStream> = generate_builder_setter_functions(fields)?;
+    let builder_struct_setter_funcations: Vec<proc_macro2::TokenStream> = generate_builder_setter_functions(fields)?;
 
     let ret = quote! {
         pub struct #builder_name_ident {
@@ -85,7 +85,7 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
         impl #builder_name_ident {
-            #(#builder_struct_setters)*
+            #(#builder_struct_setter_funcations)*
         }
     };
     return Ok(ret);
