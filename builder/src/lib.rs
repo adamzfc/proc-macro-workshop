@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use syn::spanned::Spanned;
 use quote::quote;
+use syn::spanned::Spanned;
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -11,52 +11,162 @@ pub fn derive(input: TokenStream) -> TokenStream {
     }
 }
 
-type StructFields = syn::punctuated::Punctuated<syn::Field,syn::Token!(,)>;
+type StructFields = syn::punctuated::Punctuated<syn::Field, syn::Token!(,)>;
 
 fn get_fields_from_derive_input(d: &syn::DeriveInput) -> syn::Result<&StructFields> {
     if let syn::Data::Struct(syn::DataStruct {
         fields: syn::Fields::Named(syn::FieldsNamed { ref named, .. }),
         ..
-    }) = d.data{
-        return Ok(named)
+    }) = d.data
+    {
+        return Ok(named);
     }
-    Err(syn::Error::new_spanned(d, "Must define on a Struct, not Enum".to_string()))
+    Err(syn::Error::new_spanned(
+        d,
+        "Must define on a Struct, not Enum".to_string(),
+    ))
 }
 
-fn generate_builder_struct_fields_def(fields: &StructFields) -> syn::Result<proc_macro2::TokenStream>{
-    let idents:Vec<_> = fields.iter().map(|f| {&f.ident}).collect();
-    let types:Vec<_> = fields.iter().map(|f| {&f.ty}).collect();
+fn generate_builder_struct_fields_def(
+    fields: &StructFields,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    // 第六关，对types 变量的构建逻辑进行了调整
+    let types: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            // 针对是否为`Option`类型字段，产生不同的结果
+            if let Some(inner_ty) = get_optional_inner_type(&f.ty) {
+                quote!(std::option::Option<#inner_ty>)
+            } else {
+                let origin_ty = &f.ty;
+                quote!(std::option::Option<#origin_ty>)
+            }
+        })
+        .collect();
 
-    let token_stream = quote!{
-        #(#idents: std::option::Option<#types>),*
+    let token_stream = quote! {
+        // 下面这一行，也做了修改
+        #(#idents: #types),*
     };
     Ok(token_stream)
 }
 
-fn generate_builder_struct_factory_init_clauses(fields: &StructFields) -> syn::Result<Vec<proc_macro2::TokenStream>>{
-    let init_clauses: Vec<_> = fields.iter().map(|f| {
-        let ident = &f.ident;
-        quote!{
-            #ident: std::option::Option::None
-        }
-    }).collect();
+fn generate_builder_struct_factory_init_clauses(
+    fields: &StructFields,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let init_clauses: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            let ident = &f.ident;
+            quote! {
+                #ident: std::option::Option::None
+            }
+        })
+        .collect();
 
     Ok(init_clauses)
 }
 
-fn generate_builder_setter_functions(fields: &StructFields) -> syn::Result<Vec<proc_macro2::TokenStream>>{
-    let setters: Vec<_> = fields.iter().map(|f| {
-        let ident = &f.ident;
-        let ty = &f.ty;
-        quote!{
-            pub fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                self.#ident = std::option::Option::Some(#ident);
-                self
+fn generate_builder_setter_functions(
+    fields: &StructFields,
+) -> syn::Result<proc_macro2::TokenStream>{
+    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+
+    let mut final_tokenstream = proc_macro2::TokenStream::new();
+
+    for (ident, type_) in idents.iter().zip(types.iter()) {
+        let tokenstream_piece;
+        // 第六关，对tokenstream_piece 变量的构建逻辑进行了调整
+        if let Some(inner_ty) = get_optional_inner_type(type_) {
+            tokenstream_piece = quote! {
+                fn #ident(&mut self, #ident: #inner_ty) -> &mut Self {
+                    self.#ident = std::option::Option::Some(#ident);
+                    self
+                }
+            };
+        } else {
+            tokenstream_piece = quote! {
+                fn #ident(&mut self, #ident: #type_) -> &mut Self {
+                    self.#ident = std::option::Option::Some(#ident);
+                    self
+                }
+            };
+        }
+        final_tokenstream.extend(tokenstream_piece);
+    }
+
+    Ok(final_tokenstream)
+}
+
+fn generate_builder_build_function(
+    fields: &StructFields,
+    origin_struct_ident: &syn::Ident,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    // 下面这一行是第六关新加的，之前没用到type相关信息，就没写下面这一行
+    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+
+    let mut checker_code_pieces = Vec::new();
+    for idx in 0..idents.len() {
+        let ident = idents[idx];
+        // 第六关修改，只对不是`Option`类型的字段生成校验逻辑
+        if get_optional_inner_type(&types[idx]).is_none() {
+            checker_code_pieces.push(quote! {
+                if self.#ident.is_none() {
+                    let err = format!("{} field missing", stringify!(#ident));
+                    return std::result::Result::Err(err.into())
+                }
+            });
+        }
+    }
+
+    let mut fill_result_clauses = Vec::new();
+    for idx in 0..idents.len() {
+        let ident = idents[idx];
+        // 这里需要区分`Option`类型字段和非`Option`类型字段
+        if get_optional_inner_type(&types[idx]).is_none() {
+            fill_result_clauses.push(quote! {
+                #ident: self.#ident.clone().unwrap()
+            });
+        }else {
+            fill_result_clauses.push(quote! {
+                #ident: self.#ident.clone()
+            });
+        }
+    }
+
+    let token_stream = quote! {
+        pub fn build(&mut self) -> std::result::Result<#origin_struct_ident, std::boxed::Box<dyn std::error::Error>> {
+            #(#checker_code_pieces)*
+            let ret = #origin_struct_ident{
+                #(#fill_result_clauses),*
+            };
+            std::result::Result::Ok(ret)
+        }
+    };
+    Ok(token_stream)
+}
+
+fn get_optional_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(syn::TypePath { ref path, .. }) = ty {
+        // 这里我们取segments的最后一节来判断是不是`Option<T>`，这样如果用户写的是`std:option:Option<T>`我们也能识别出最后的`Option<T>`
+        if let Some(seg) = path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                    ref args,
+                    ..
+                }) = seg.arguments
+                {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.first() {
+                        return Some(inner_ty);
+                    }
+                }
             }
         }
-    }).collect();
-
-    Ok(setters)
+    }
+    None
 }
 
 fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -69,7 +179,9 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = get_fields_from_derive_input(st)?;
     let builder_struct_fields_def = generate_builder_struct_fields_def(fields)?;
     let builder_struct_factory_init_clauses = generate_builder_struct_factory_init_clauses(fields)?;
-    let builder_struct_setter_funcations: Vec<proc_macro2::TokenStream> = generate_builder_setter_functions(fields)?;
+    let builder_struct_setter_funcations =
+        generate_builder_setter_functions(fields)?;
+    let builder_struct_build_functions = generate_builder_build_function(fields, struct_ident)?;
 
     let ret = quote! {
         pub struct #builder_name_ident {
@@ -85,7 +197,8 @@ fn do_expand(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
         impl #builder_name_ident {
-            #(#builder_struct_setter_funcations)*
+            #builder_struct_setter_funcations
+            #builder_struct_build_functions
         }
     };
     return Ok(ret);
